@@ -944,10 +944,10 @@ fail:
     if (close_in)
         ff_format_io_close(c->ctx, &in);
     c->ctx->ctx_flags = c->ctx->ctx_flags & ~(unsigned)AVFMTCTX_UNSEEKABLE;
-    if (!c->n_variants || !c->variants[0]->n_playlists ||
+    /*if (!c->n_variants || !c->variants[0]->n_playlists ||
         !(c->variants[0]->playlists[0]->finished ||
           c->variants[0]->playlists[0]->type == PLS_TYPE_EVENT))
-        c->ctx->ctx_flags |= AVFMTCTX_UNSEEKABLE;
+        c->ctx->ctx_flags |= AVFMTCTX_UNSEEKABLE;*/
     return ret;
 }
 
