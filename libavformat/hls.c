@@ -199,6 +199,7 @@ typedef struct HLSContext {
 
     int cur_seq_no;
     int live_start_index;
+    int force_endlist;
     int first_packet;
     int64_t first_timestamp;
     int64_t cur_timestamp;
@@ -761,7 +762,7 @@ static int parse_playlist(HLSContext *c, const char *url,
         pls->segments = NULL;
         pls->n_segments = 0;
 
-        pls->finished = 0;
+        pls->finished = c->force_endlist;
         pls->type = PLS_TYPE_UNSPECIFIED;
     }
     while (!avio_feof(in)) {
@@ -944,10 +945,10 @@ fail:
     if (close_in)
         ff_format_io_close(c->ctx, &in);
     c->ctx->ctx_flags = c->ctx->ctx_flags & ~(unsigned)AVFMTCTX_UNSEEKABLE;
-    /*if (!c->n_variants || !c->variants[0]->n_playlists ||
+    if (!c->n_variants || !c->variants[0]->n_playlists ||
         !(c->variants[0]->playlists[0]->finished ||
           c->variants[0]->playlists[0]->type == PLS_TYPE_EVENT))
-        c->ctx->ctx_flags |= AVFMTCTX_UNSEEKABLE;*/
+        c->ctx->ctx_flags |= AVFMTCTX_UNSEEKABLE;
     return ret;
 }
 
@@ -2311,6 +2312,8 @@ static int hls_probe(const AVProbeData *p)
 static const AVOption hls_options[] = {
     {"live_start_index", "segment index to start live streams at (negative values are from the end)",
         OFFSET(live_start_index), AV_OPT_TYPE_INT, {.i64 = -3}, INT_MIN, INT_MAX, FLAGS},
+    {"force_endlist", "Interprets playlist as finished",
+        OFFSET(force_endlist), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, FLAGS },
     {"allowed_extensions", "List of file extensions that hls is allowed to access",
         OFFSET(allowed_extensions), AV_OPT_TYPE_STRING,
         {.str = "3gp,aac,avi,flac,mkv,m3u8,m4a,m4s,m4v,mpg,mov,mp2,mp3,mp4,mpeg,mpegts,ogg,ogv,oga,ts,vob,wav"},
