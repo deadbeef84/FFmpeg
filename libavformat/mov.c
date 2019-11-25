@@ -4792,8 +4792,8 @@ static int mov_read_trun(MOVContext *c, AVIOContext *pb, MOVAtom atom)
                     ", using it for pts\n", pts);
         } else if (frag_stream_info->sidx_pts != AV_NOPTS_VALUE) {
             // FIXME: sidx earliest_presentation_time is *PTS*, s.b.
-            // pts = frag_stream_info->sidx_pts;
-            dts = frag_stream_info->sidx_pts - sc->time_offset;
+            pts = frag_stream_info->sidx_pts;
+            // dts = frag_stream_info->sidx_pts - sc->time_offset;
             av_log(c->fc, AV_LOG_DEBUG, "found sidx time %"PRId64
                     ", using it for pts\n", pts);
         } else if (frag_stream_info->tfdt_dts != AV_NOPTS_VALUE) {
@@ -7703,15 +7703,15 @@ static int mov_switch_root(AVFormatContext *s, int64_t target, int index)
 
     if (index >= 0 && index < mov->frag_index.nb_items)
         target = mov->frag_index.item[index].moof_offset;
-    if (avio_seek(s->pb, target, SEEK_SET) != target) {
+    if (target >= 0 && avio_seek(s->pb, target, SEEK_SET) != target) {
         av_log(mov->fc, AV_LOG_ERROR, "root atom offset 0x%"PRIx64": partial file\n", target);
         return AVERROR_INVALIDDATA;
     }
 
     mov->next_root_atom = 0;
-    if (index < 0 || index >= mov->frag_index.nb_items)
+    if ((index < 0 && target >= 0) || index >= mov->frag_index.nb_items)
         index = search_frag_moof_offset(&mov->frag_index, target);
-    if (index < mov->frag_index.nb_items) {
+    if (index >= 0 && index < mov->frag_index.nb_items) {
         if (index + 1 < mov->frag_index.nb_items)
             mov->next_root_atom = mov->frag_index.item[index + 1].moof_offset;
         if (mov->frag_index.item[index].headers_read)
@@ -7762,8 +7762,38 @@ static int mov_read_packet(AVFormatContext *s, AVPacket *pkt)
     AVStream *st = NULL;
     int64_t current_index;
     int ret;
+    int i;
     mov->fc = s;
  retry:
+    if (s->pb->pos == 0) {
+
+        // Discard current fragment index
+        if (mov->frag_index.allocated_size > 0) {
+            av_freep(&mov->frag_index.item);
+            mov->frag_index.nb_items = 0;
+            mov->frag_index.allocated_size = 0;
+            mov->frag_index.current = -1;
+            mov->frag_index.complete = 0;
+        }
+
+        for (i = 0; i < s->nb_streams; i++) {
+            AVStream *avst = s->streams[i];
+            MOVStreamContext *msc = avst->priv_data;
+
+            // Clear current sample
+            mov_current_sample_set(msc, 0);
+
+            // Discard current index entries
+            if (avst->index_entries_allocated_size > 0) {
+                av_freep(&avst->index_entries);
+                avst->index_entries_allocated_size = 0;
+                avst->nb_index_entries = 0;
+            }
+        }
+
+        if ((ret = mov_switch_root(s, -1, -1)) < 0)
+            return ret;
+    }
     sample = mov_find_next_sample(s, &st);
     if (!sample || (mov->next_root_atom && sample->pos > mov->next_root_atom)) {
         if (!mov->next_root_atom)
