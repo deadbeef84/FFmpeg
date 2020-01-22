@@ -945,10 +945,10 @@ fail:
     if (close_in)
         ff_format_io_close(c->ctx, &in);
     c->ctx->ctx_flags = c->ctx->ctx_flags & ~(unsigned)AVFMTCTX_UNSEEKABLE;
-    if (!c->n_variants || !c->variants[0]->n_playlists ||
+    /*if (!c->n_variants || !c->variants[0]->n_playlists ||
         !(c->variants[0]->playlists[0]->finished ||
           c->variants[0]->playlists[0]->type == PLS_TYPE_EVENT))
-        c->ctx->ctx_flags |= AVFMTCTX_UNSEEKABLE;
+        c->ctx->ctx_flags |= AVFMTCTX_UNSEEKABLE;*/
     return ret;
 }
 
@@ -2122,8 +2122,8 @@ static int hls_read_packet(AVFormatContext *s, AVPacket *pkt)
                     ts_diff = av_rescale_rnd(pls->pkt.dts, AV_TIME_BASE,
                                             tb.den, AV_ROUND_DOWN) -
                             pls->seek_timestamp;
-                    if (ts_diff >= 0 && (pls->seek_flags  & AVSEEK_FLAG_ANY ||
-                                        pls->pkt.flags & AV_PKT_FLAG_KEY)) {
+                    if ((ts_diff >= 0 && (pls->seek_flags & AVSEEK_FLAG_ANY)) ||
+                        (!(pls->seek_flags & AVSEEK_FLAG_ANY) && (pls->pkt.flags & AV_PKT_FLAG_KEY)))  {
                         pls->seek_timestamp = AV_NOPTS_VALUE;
                         break;
                     }
