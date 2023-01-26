@@ -483,6 +483,7 @@ static void capture_thread(AJAThread *thread, void *opaque)
 
             // set producer reference time side data
             ff_side_data_set_prft(&video_pkt, lastPtrf);
+            ff_side_data_set_prft(&audio_pkt, lastPtrf);
 
             av_log(avctx, AV_LOG_TRACE, "video_pts=%li audio_pts=%li prft=%lu\n", video_pkt.pts, audio_pkt.pts, lastPtrf);
 
@@ -513,8 +514,6 @@ static void capture_thread(AJAThread *thread, void *opaque)
                 video_pkt.pts = av_rescale_q(lastFrameTime, AJA_AUDIO_TIME_BASE_Q, ctx->video_st->time_base);
                 video_pkt.dts = video_pkt.pts;
 
-                ff_side_data_set_prft(&video_pkt, lastPtrf);
-
                 // NTV2_POINTER buffer(video_pkt.data, video_pkt.size);
                 // if (!testPatternGen.DrawTestPattern(NTV2_TestPatt_ColorBars100, formatDescriptor, buffer)) {
                     ::memset(video_pkt.data, 0, video_pkt.size);
@@ -527,6 +526,11 @@ static void capture_thread(AJAThread *thread, void *opaque)
                 audio_pkt.size = audio_pkt.buf->size;
                 audio_pkt.pts = av_rescale_q(lastFrameTime, AJA_AUDIO_TIME_BASE_Q, ctx->audio_st->time_base);
                 audio_pkt.dts = audio_pkt.pts;
+
+                // PRFT
+
+                ff_side_data_set_prft(&video_pkt, lastPtrf);
+                ff_side_data_set_prft(&audio_pkt, lastPtrf);
 
                 // Send
 
