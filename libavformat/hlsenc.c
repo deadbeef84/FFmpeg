@@ -2498,6 +2498,22 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
     }
 
     can_split = can_split && (pkt->pts - vs->end_pts > 0);
+
+    {
+        size_t side_data_size;
+        AVProducerReferenceTime *prft = (AVProducerReferenceTime *)av_packet_get_side_data(pkt, AV_PKT_DATA_PRFT, &side_data_size);
+
+        av_log(s, AV_LOG_WARNING, "PACKET: prft=%"PRId64" pts=%"PRId64" pts_time=%"PRId64" end_pts=%"PRId64" written=%d can_split=%d compare=%d\n",
+            prft ? prft->wallclock : 0,
+            pkt->pts,
+            av_rescale_q(pkt->pts, st->time_base, AV_TIME_BASE_Q),
+            end_pts,
+            vs->packets_written,
+            can_split,
+            av_compare_ts(pkt->pts - vs->start_pts, st->time_base, end_pts, AV_TIME_BASE_Q)
+        );
+    }
+
     if (vs->packets_written && can_split && av_compare_ts(pkt->pts - vs->start_pts, st->time_base,
                                                           end_pts, AV_TIME_BASE_Q) >= 0) {
         int64_t new_start_pos;
@@ -2670,7 +2686,7 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
     // set program-date-time from producer-reference-time side data
     if (hls->flags & HLS_PROGRAM_DATE_TIME && !vs->prog_date_time) {
         AVProducerReferenceTime *prft;
-        int side_data_size;
+        size_t side_data_size;
 
         prft = (AVProducerReferenceTime *)av_packet_get_side_data(pkt, AV_PKT_DATA_PRFT, &side_data_size);
         if (prft && side_data_size == sizeof(AVProducerReferenceTime)) {
