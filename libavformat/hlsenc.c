@@ -2495,21 +2495,6 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
                 vs->duration = (double)(pkt->pts - vs->end_pts) * st->time_base.num / st->time_base.den;
             }
         }
-
-        // set program-date-time from producer-reference-time side data
-        if (hls->flags & HLS_PROGRAM_DATE_TIME && !vs->prog_date_time) {
-            AVProducerReferenceTime *prft;
-            int side_data_size;
-
-            prft = (AVProducerReferenceTime *)av_packet_get_side_data(pkt, AV_PKT_DATA_PRFT, &side_data_size);
-            if (prft && side_data_size == sizeof(AVProducerReferenceTime)) {
-                av_log(s, AV_LOG_INFO, "setting program-date-time from prft1 pts=%"PRId64" prft=%"PRId64"\n", pkt->pts, prft->wallclock);
-                vs->prog_date_time = prft->wallclock;
-            } else {
-                av_log(s, AV_LOG_WARNING, "missing prft, using system clock\n");
-                vs->prog_date_time = av_gettime();
-            }
-        }
     }
 
     can_split = can_split && (pkt->pts - vs->end_pts > 0);
@@ -2626,21 +2611,6 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
             double cur_duration =  (double)(pkt->pts - vs->end_pts) * st->time_base.num / st->time_base.den;
             ret = hls_append_segment(s, hls, vs, cur_duration, vs->start_pos, vs->size);
 
-            // set program-date-time from producer-reference-time side data
-            if (hls->flags & HLS_PROGRAM_DATE_TIME) {
-                AVProducerReferenceTime *prft;
-                int side_data_size;
-
-                prft = (AVProducerReferenceTime *)av_packet_get_side_data(pkt, AV_PKT_DATA_PRFT, &side_data_size);
-                if (prft && side_data_size == sizeof(AVProducerReferenceTime)) {
-                    av_log(s, AV_LOG_INFO, "setting program-date-time from prft2 pts=%"PRId64" prft=%"PRId64"\n", pkt->pts, prft->wallclock);
-                    vs->prog_date_time = prft->wallclock;
-                } else {
-                    av_log(s, AV_LOG_WARNING, "missing prft, using system clock\n");
-                    vs->prog_date_time = av_gettime();
-                }
-            }
-
             vs->end_pts = pkt->pts;
             vs->duration = 0;
             if (ret < 0) {
@@ -2694,6 +2664,21 @@ static int hls_write_packet(AVFormatContext *s, AVPacket *pkt)
 
         if (ret < 0) {
             return ret;
+        }
+    }
+
+    // set program-date-time from producer-reference-time side data
+    if (hls->flags & HLS_PROGRAM_DATE_TIME && !vs->prog_date_time) {
+        AVProducerReferenceTime *prft;
+        int side_data_size;
+
+        prft = (AVProducerReferenceTime *)av_packet_get_side_data(pkt, AV_PKT_DATA_PRFT, &side_data_size);
+        if (prft && side_data_size == sizeof(AVProducerReferenceTime)) {
+            av_log(s, AV_LOG_INFO, "setting program-date-time from prft pts=%"PRId64" prft=%"PRId64" type=%d\n", pkt->pts, prft->wallclock, st->codecpar->codec_type);
+            vs->prog_date_time = prft->wallclock;
+        } else {
+            av_log(s, AV_LOG_WARNING, "missing prft, using system clock\n");
+            vs->prog_date_time = av_gettime();
         }
     }
 
