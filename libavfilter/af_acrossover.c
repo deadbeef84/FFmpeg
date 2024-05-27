@@ -58,6 +58,7 @@ typedef struct AudioCrossoverContext {
     char *gains_str;
     int order_opt;
     float level_in;
+    int precision;
 
     int order;
     int filter_count;
@@ -86,23 +87,64 @@ typedef struct AudioCrossoverContext {
 
 static const AVOption acrossover_options[] = {
     { "split", "set split frequencies", OFFSET(splits_str), AV_OPT_TYPE_STRING, {.str="500"}, 0, 0, AF },
-    { "order", "set filter order",      OFFSET(order_opt),  AV_OPT_TYPE_INT,    {.i64=1},     0, 9, AF, "m" },
-    { "2nd",   "2nd order (12 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=0},     0, 0, AF, "m" },
-    { "4th",   "4th order (24 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=1},     0, 0, AF, "m" },
-    { "6th",   "6th order (36 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=2},     0, 0, AF, "m" },
-    { "8th",   "8th order (48 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=3},     0, 0, AF, "m" },
-    { "10th",  "10th order (60 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=4},     0, 0, AF, "m" },
-    { "12th",  "12th order (72 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=5},     0, 0, AF, "m" },
-    { "14th",  "14th order (84 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=6},     0, 0, AF, "m" },
-    { "16th",  "16th order (96 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=7},     0, 0, AF, "m" },
-    { "18th",  "18th order (108 dB/8ve)",0,                 AV_OPT_TYPE_CONST,  {.i64=8},     0, 0, AF, "m" },
-    { "20th",  "20th order (120 dB/8ve)",0,                 AV_OPT_TYPE_CONST,  {.i64=9},     0, 0, AF, "m" },
+    { "order", "set filter order",      OFFSET(order_opt),  AV_OPT_TYPE_INT,    {.i64=1},     0, 9, AF, .unit = "m" },
+    { "2nd",   "2nd order (12 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=0},     0, 0, AF, .unit = "m" },
+    { "4th",   "4th order (24 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=1},     0, 0, AF, .unit = "m" },
+    { "6th",   "6th order (36 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=2},     0, 0, AF, .unit = "m" },
+    { "8th",   "8th order (48 dB/8ve)", 0,                  AV_OPT_TYPE_CONST,  {.i64=3},     0, 0, AF, .unit = "m" },
+    { "10th",  "10th order (60 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=4},     0, 0, AF, .unit = "m" },
+    { "12th",  "12th order (72 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=5},     0, 0, AF, .unit = "m" },
+    { "14th",  "14th order (84 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=6},     0, 0, AF, .unit = "m" },
+    { "16th",  "16th order (96 dB/8ve)",0,                  AV_OPT_TYPE_CONST,  {.i64=7},     0, 0, AF, .unit = "m" },
+    { "18th",  "18th order (108 dB/8ve)",0,                 AV_OPT_TYPE_CONST,  {.i64=8},     0, 0, AF, .unit = "m" },
+    { "20th",  "20th order (120 dB/8ve)",0,                 AV_OPT_TYPE_CONST,  {.i64=9},     0, 0, AF, .unit = "m" },
     { "level", "set input gain",        OFFSET(level_in),   AV_OPT_TYPE_FLOAT,  {.dbl=1},     0, 1, AF },
     { "gain",  "set output bands gain", OFFSET(gains_str),  AV_OPT_TYPE_STRING, {.str="1.f"}, 0, 0, AF },
+    { "precision",  "set processing precision", OFFSET(precision),   AV_OPT_TYPE_INT,   {.i64=0}, 0, 2, AF, .unit = "precision" },
+    {  "auto",  "set auto processing precision",                  0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, AF, .unit = "precision" },
+    {  "float", "set single-floating point processing precision", 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, AF, .unit = "precision" },
+    {  "double","set double-floating point processing precision", 0, AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, AF, .unit = "precision" },
     { NULL }
 };
 
 AVFILTER_DEFINE_CLASS(acrossover);
+
+static int query_formats(AVFilterContext *ctx)
+{
+    AudioCrossoverContext *s = ctx->priv;
+    static const enum AVSampleFormat auto_sample_fmts[] = {
+        AV_SAMPLE_FMT_FLTP,
+        AV_SAMPLE_FMT_DBLP,
+        AV_SAMPLE_FMT_NONE
+    };
+    enum AVSampleFormat sample_fmts[] = {
+        AV_SAMPLE_FMT_FLTP,
+        AV_SAMPLE_FMT_NONE
+    };
+    const enum AVSampleFormat *sample_fmts_list = sample_fmts;
+    int ret = ff_set_common_all_channel_counts(ctx);
+    if (ret < 0)
+        return ret;
+
+    switch (s->precision) {
+    case 0:
+        sample_fmts_list = auto_sample_fmts;
+        break;
+    case 1:
+        sample_fmts[0] = AV_SAMPLE_FMT_FLTP;
+        break;
+    case 2:
+        sample_fmts[0] = AV_SAMPLE_FMT_DBLP;
+        break;
+    default:
+        break;
+    }
+    ret = ff_set_common_formats_from_list(ctx, sample_fmts_list);
+    if (ret < 0)
+        return ret;
+
+    return ff_set_common_all_samplerates(ctx);
+}
 
 static int parse_gains(AVFilterContext *ctx)
 {
@@ -586,7 +628,7 @@ const AVFilter ff_af_acrossover = {
     .uninit         = uninit,
     FILTER_INPUTS(inputs),
     .outputs        = NULL,
-    FILTER_SAMPLEFMTS(AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_DBLP),
+    FILTER_QUERY_FUNC(query_formats),
     .flags          = AVFILTER_FLAG_DYNAMIC_OUTPUTS |
                       AVFILTER_FLAG_SLICE_THREADS,
 };

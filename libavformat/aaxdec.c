@@ -22,6 +22,7 @@
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
 #include "avio_internal.h"
+#include "demux.h"
 #include "internal.h"
 
 typedef struct AAXColumn {
@@ -249,8 +250,14 @@ static int aax_read_header(AVFormatContext *s)
 
                 start = avio_rb32(pb);
                 size  = avio_rb32(pb);
+                if (!size)
+                    return AVERROR_INVALIDDATA;
                 a->segments[r].start = start + a->data_offset;
                 a->segments[r].end   = a->segments[r].start + size;
+                if (r &&
+                    a->segments[r].start < a->segments[r-1].end &&
+                    a->segments[r].end   > a->segments[r-1].start)
+                    return AVERROR_INVALIDDATA;
             } else
                 return AVERROR_INVALIDDATA;
         }
@@ -376,15 +383,15 @@ static int aax_read_close(AVFormatContext *s)
     return 0;
 }
 
-const AVInputFormat ff_aax_demuxer = {
-    .name           = "aax",
-    .long_name      = NULL_IF_CONFIG_SMALL("CRI AAX"),
+const FFInputFormat ff_aax_demuxer = {
+    .p.name         = "aax",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("CRI AAX"),
+    .p.extensions   = "aax",
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .priv_data_size = sizeof(AAXContext),
-    .flags_internal = FF_FMT_INIT_CLEANUP,
+    .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe     = aax_probe,
     .read_header    = aax_read_header,
     .read_packet    = aax_read_packet,
     .read_close     = aax_read_close,
-    .extensions     = "aax",
-    .flags          = AVFMT_GENERIC_INDEX,
 };

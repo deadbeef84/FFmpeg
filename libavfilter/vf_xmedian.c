@@ -22,13 +22,11 @@
 
 #include "libavutil/avstring.h"
 #include "libavutil/imgutils.h"
-#include "libavutil/intreadwrite.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/qsort.h"
 
 #include "avfilter.h"
-#include "formats.h"
 #include "internal.h"
 #include "framesync.h"
 #include "video.h"
@@ -188,6 +186,14 @@ static int median_frames ## name(AVFilterContext *ctx, void *arg, int jobnr, int
 MEDIAN_SLICE(8, uint8_t, compare8)
 MEDIAN_SLICE(16, uint16_t, compare16)
 
+static void update_index(XMedianContext *s)
+{
+    if (s->nb_inputs & 1)
+        s->index = s->radius * 2.f * s->percentile;
+    else
+        s->index = av_clip(s->radius * 2.f * s->percentile, 1, s->nb_inputs - 1);
+}
+
 static int process_frame(FFFrameSync *fs)
 {
     AVFilterContext *ctx = fs->parent;
@@ -197,6 +203,8 @@ static int process_frame(FFFrameSync *fs)
     AVFrame *out;
     ThreadData td;
     int i, ret;
+
+    update_index(s);
 
     for (i = 0; i < s->nb_inputs; i++) {
         if ((ret = ff_framesync_get_frame(&s->fs, i, &in[i], 0)) < 0)
@@ -319,23 +327,13 @@ static int activate(AVFilterContext *ctx)
     return ff_framesync_activate(&s->fs);
 }
 
-static int process_command(AVFilterContext *ctx, const char *cmd, const char *args,
-                           char *res, int res_len, int flags)
-{
-    XMedianContext *s = ctx->priv;
-    int ret;
-
-    ret = ff_filter_process_command(ctx, cmd, args, res, res_len, flags);
-    if (ret < 0)
-        return ret;
-
-    if (s->nb_inputs & 1)
-        s->index = s->radius * 2.f * s->percentile;
-    else
-        s->index = av_clip(s->radius * 2.f * s->percentile, 1, s->nb_inputs - 1);
-
-    return 0;
-}
+static const AVFilterPad outputs[] = {
+    {
+        .name          = "default",
+        .type          = AVMEDIA_TYPE_VIDEO,
+        .config_props  = config_output,
+    },
+};
 
 #if CONFIG_XMEDIAN_FILTER
 static av_cold int xmedian_init(AVFilterContext *ctx)
@@ -373,14 +371,6 @@ static const AVOption xmedian_options[] = {
     { NULL },
 };
 
-static const AVFilterPad outputs[] = {
-    {
-        .name          = "default",
-        .type          = AVMEDIA_TYPE_VIDEO,
-        .config_props  = config_output,
-    },
-};
-
 FRAMESYNC_DEFINE_CLASS(xmedian, XMedianContext, fs);
 
 const AVFilter ff_vf_xmedian = {
@@ -396,7 +386,7 @@ const AVFilter ff_vf_xmedian = {
     .activate      = activate,
     .flags         = AVFILTER_FLAG_DYNAMIC_INPUTS | AVFILTER_FLAG_SLICE_THREADS |
                      AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
-    .process_command = process_command,
+    .process_command = ff_filter_process_command,
 };
 
 #endif /* CONFIG_XMEDIAN_FILTER */
@@ -409,6 +399,8 @@ static int tmedian_filter_frame(AVFilterLink *inlink, AVFrame *in)
     XMedianContext *s = ctx->priv;
     ThreadData td;
     AVFrame *out;
+
+    update_index(s);
 
     if (s->nb_frames < s->nb_inputs) {
         s->frames[s->nb_frames] = in;
@@ -436,7 +428,7 @@ static int tmedian_filter_frame(AVFilterLink *inlink, AVFrame *in)
     td.out = out;
     td.in = s->frames;
     ff_filter_execute(ctx, s->median_frames, &td, NULL,
-                      FFMIN(s->height[0], ff_filter_get_nb_threads(ctx)));
+                      FFMIN(s->height[1], s->nb_threads));
 
     return ff_filter_frame(outlink, out);
 }
@@ -456,14 +448,6 @@ static const AVFilterPad tmedian_inputs[] = {
     },
 };
 
-static const AVFilterPad tmedian_outputs[] = {
-    {
-        .name          = "default",
-        .type          = AVMEDIA_TYPE_VIDEO,
-        .config_props  = config_output,
-    },
-};
-
 AVFILTER_DEFINE_CLASS(tmedian);
 
 const AVFilter ff_vf_tmedian = {
@@ -472,12 +456,12 @@ const AVFilter ff_vf_tmedian = {
     .priv_size     = sizeof(XMedianContext),
     .priv_class    = &tmedian_class,
     FILTER_INPUTS(tmedian_inputs),
-    FILTER_OUTPUTS(tmedian_outputs),
+    FILTER_OUTPUTS(outputs),
     FILTER_PIXFMTS_ARRAY(pixel_fmts),
     .init          = init,
     .uninit        = uninit,
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL | AVFILTER_FLAG_SLICE_THREADS,
-    .process_command = process_command,
+    .process_command = ff_filter_process_command,
 };
 
 #endif /* CONFIG_TMEDIAN_FILTER */

@@ -46,7 +46,7 @@
  * where Y = cr * R + cg * G + cb * B and cr + cg + cb = 1.
  */
 const int32_t ff_yuv2rgb_coeffs[11][4] = {
-    { 117489, 138438, 13975, 34925 }, /* no sequence_display_extension */
+    { 104597, 132201, 25675, 53279 }, /* no sequence_display_extension */
     { 117489, 138438, 13975, 34925 }, /* ITU-R Rec. 709 (1990) */
     { 104597, 132201, 25675, 53279 }, /* unspecified */
     { 104597, 132201, 25675, 53279 }, /* reserved */
@@ -679,10 +679,13 @@ SwsFunc ff_yuv2rgb_get_func_ptr(SwsContext *c)
 {
     SwsFunc t = NULL;
 
-    if (ARCH_PPC)
-        t = ff_yuv2rgb_init_ppc(c);
-    if (ARCH_X86)
-        t = ff_yuv2rgb_init_x86(c);
+#if ARCH_PPC
+    t = ff_yuv2rgb_init_ppc(c);
+#elif ARCH_X86
+    t = ff_yuv2rgb_init_x86(c);
+#elif ARCH_LOONGARCH64
+    t = ff_yuv2rgb_init_loongarch(c);
+#endif
 
     if (t)
         return t;

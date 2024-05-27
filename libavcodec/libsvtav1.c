@@ -27,6 +27,8 @@
 #include "libavutil/common.h"
 #include "libavutil/frame.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/intreadwrite.h"
+#include "libavutil/mastering_display_metadata.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/avassert.h"
@@ -62,16 +64,6 @@ typedef struct SvtContext {
 
     // User options.
     AVDictionary *svtav1_opts;
-#if FF_API_SVTAV1_OPTS
-    int hierarchical_level;
-    int la_depth;
-    int scd;
-
-    int tier;
-
-    int tile_columns;
-    int tile_rows;
-#endif
     int enc_mode;
     int crf;
     int qp;
@@ -124,16 +116,12 @@ static int svt_print_error(void *log_ctx, EbErrorType err,
 
 static int alloc_buffer(EbSvtAv1EncConfiguration *config, SvtContext *svt_enc)
 {
-    const int    pack_mode_10bit =
-        (config->encoder_bit_depth > 8) && (config->compressed_ten_bit_format == 0) ? 1 : 0;
-    const size_t luma_size_8bit  =
-        config->source_width * config->source_height * (1 << pack_mode_10bit);
-    const size_t luma_size_10bit =
-        (config->encoder_bit_depth > 8 && pack_mode_10bit == 0) ? luma_size_8bit : 0;
+    const size_t luma_size = config->source_width * config->source_height *
+        (config->encoder_bit_depth > 8 ? 2 : 1);
 
     EbSvtIOFormat *in_data;
 
-    svt_enc->raw_size = (luma_size_8bit + luma_size_10bit) * 3 / 2;
+    svt_enc->raw_size = luma_size * 3 / 2;
 
     // allocate buffer for in and out
     svt_enc->in_buf           = av_mallocz(sizeof(*svt_enc->in_buf));
@@ -150,6 +138,69 @@ static int alloc_buffer(EbSvtAv1EncConfiguration *config, SvtContext *svt_enc)
 
 }
 
+static void handle_mdcv(struct EbSvtAv1MasteringDisplayInfo *dst,
+                        const AVMasteringDisplayMetadata *mdcv)
+{
+    if (mdcv->has_primaries) {
+        const struct EbSvtAv1ChromaPoints *const points[] = {
+            &dst->r,
+            &dst->g,
+            &dst->b,
+        };
+
+        for (int i = 0; i < 3; i++) {
+            const struct EbSvtAv1ChromaPoints *dst = points[i];
+            const AVRational *src = mdcv->display_primaries[i];
+
+            AV_WB16(&dst->x,
+                    av_rescale_q(1, src[0], (AVRational){ 1, (1 << 16) }));
+            AV_WB16(&dst->y,
+                    av_rescale_q(1, src[1], (AVRational){ 1, (1 << 16) }));
+        }
+
+        AV_WB16(&dst->white_point.x,
+                av_rescale_q(1, mdcv->white_point[0],
+                             (AVRational){ 1, (1 << 16) }));
+        AV_WB16(&dst->white_point.y,
+                av_rescale_q(1, mdcv->white_point[1],
+                             (AVRational){ 1, (1 << 16) }));
+    }
+
+    if (mdcv->has_luminance) {
+        AV_WB32(&dst->max_luma,
+                av_rescale_q(1, mdcv->max_luminance,
+                             (AVRational){ 1, (1 << 8) }));
+        AV_WB32(&dst->min_luma,
+                av_rescale_q(1, mdcv->min_luminance,
+                             (AVRational){ 1, (1 << 14) }));
+    }
+}
+
+static void handle_side_data(AVCodecContext *avctx,
+                             EbSvtAv1EncConfiguration *param)
+{
+    const AVFrameSideData *cll_sd =
+        av_frame_side_data_get(avctx->decoded_side_data,
+            avctx->nb_decoded_side_data, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+    const AVFrameSideData *mdcv_sd =
+        av_frame_side_data_get(avctx->decoded_side_data,
+            avctx->nb_decoded_side_data,
+            AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+
+    if (cll_sd) {
+        const AVContentLightMetadata *cll =
+            (AVContentLightMetadata *)cll_sd->data;
+
+        AV_WB16(&param->content_light_level.max_cll, cll->MaxCLL);
+        AV_WB16(&param->content_light_level.max_fall, cll->MaxFALL);
+    }
+
+    if (mdcv_sd) {
+        handle_mdcv(&param->mastering_display,
+                    (AVMasteringDisplayMetadata *)mdcv_sd->data);
+    }
+}
+
 static int config_enc_params(EbSvtAv1EncConfiguration *param,
                              AVCodecContext *avctx)
 {
@@ -158,18 +209,7 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
     AVDictionaryEntry *en = NULL;
 
     // Update param from options
-#if FF_API_SVTAV1_OPTS
-    param->hierarchical_levels      = svt_enc->hierarchical_level;
-    param->tier                     = svt_enc->tier;
-    param->scene_change_detection   = svt_enc->scd;
-    param->tile_columns             = svt_enc->tile_columns;
-    param->tile_rows                = svt_enc->tile_rows;
-
-    if (svt_enc->la_depth >= 0)
-        param->look_ahead_distance  = svt_enc->la_depth;
-#endif
-
-    if (svt_enc->enc_mode >= 0)
+    if (svt_enc->enc_mode >= -1)
         param->enc_mode             = svt_enc->enc_mode;
 
     if (avctx->bit_rate) {
@@ -178,9 +218,15 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
             param->rate_control_mode = 1;
         else
             param->rate_control_mode = 2;
+
+        param->max_qp_allowed       = avctx->qmax;
+        param->min_qp_allowed       = avctx->qmin;
     }
     param->max_bit_rate             = avctx->rc_max_rate;
-    param->vbv_bufsize              = avctx->rc_buffer_size;
+    if ((avctx->bit_rate > 0 || avctx->rc_max_rate > 0) && avctx->rc_buffer_size)
+        param->maximum_buffer_size_ms =
+            avctx->rc_buffer_size * 1000LL /
+            FFMAX(avctx->bit_rate, avctx->rc_max_rate);
 
     if (svt_enc->crf > 0) {
         param->qp                   = svt_enc->crf;
@@ -190,6 +236,90 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
         param->rate_control_mode    = 0;
         param->enable_adaptive_quantization = 0;
     }
+
+    desc = av_pix_fmt_desc_get(avctx->pix_fmt);
+    param->color_primaries          = avctx->color_primaries;
+    param->matrix_coefficients      = (desc->flags & AV_PIX_FMT_FLAG_RGB) ?
+                                      AVCOL_SPC_RGB : avctx->colorspace;
+    param->transfer_characteristics = avctx->color_trc;
+
+    if (avctx->color_range != AVCOL_RANGE_UNSPECIFIED)
+        param->color_range = avctx->color_range == AVCOL_RANGE_JPEG;
+    else
+        param->color_range = !!(desc->flags & AV_PIX_FMT_FLAG_RGB);
+
+#if SVT_AV1_CHECK_VERSION(1, 0, 0)
+    if (avctx->chroma_sample_location != AVCHROMA_LOC_UNSPECIFIED) {
+        const char *name =
+            av_chroma_location_name(avctx->chroma_sample_location);
+
+        switch (avctx->chroma_sample_location) {
+        case AVCHROMA_LOC_LEFT:
+            param->chroma_sample_position = EB_CSP_VERTICAL;
+            break;
+        case AVCHROMA_LOC_TOPLEFT:
+            param->chroma_sample_position = EB_CSP_COLOCATED;
+            break;
+        default:
+            if (!name)
+                break;
+
+            av_log(avctx, AV_LOG_WARNING,
+                   "Specified chroma sample location %s is unsupported "
+                   "on the AV1 bit stream level. Usage of a container that "
+                   "allows passing this information - such as Matroska - "
+                   "is recommended.\n",
+                   name);
+            break;
+        }
+    }
+#endif
+
+    if (avctx->profile != AV_PROFILE_UNKNOWN)
+        param->profile = avctx->profile;
+
+    if (avctx->level != AV_LEVEL_UNKNOWN)
+        param->level = avctx->level;
+
+    // gop_size == 1 case is handled when encoding each frame by setting
+    // pic_type to EB_AV1_KEY_PICTURE. For gop_size > 1, set the
+    // intra_period_length. Even though setting intra_period_length to 0 should
+    // work in this case, it does not.
+    // See: https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2076
+    if (avctx->gop_size > 1)
+        param->intra_period_length  = avctx->gop_size - 1;
+
+#if SVT_AV1_CHECK_VERSION(1, 1, 0)
+    // In order for SVT-AV1 to force keyframes by setting pic_type to
+    // EB_AV1_KEY_PICTURE on any frame, force_key_frames has to be set. Note
+    // that this does not force all frames to be keyframes (it only forces a
+    // keyframe with pic_type is set to EB_AV1_KEY_PICTURE). As of now, SVT-AV1
+    // does not support arbitrary keyframe requests by setting pic_type to
+    // EB_AV1_KEY_PICTURE, so it is done only when gop_size == 1.
+    // FIXME: When SVT-AV1 supports arbitrary keyframe requests, this code needs
+    // to be updated to set force_key_frames accordingly.
+    if (avctx->gop_size == 1)
+        param->force_key_frames = 1;
+#endif
+
+    if (avctx->framerate.num > 0 && avctx->framerate.den > 0) {
+        param->frame_rate_numerator   = avctx->framerate.num;
+        param->frame_rate_denominator = avctx->framerate.den;
+    } else {
+        param->frame_rate_numerator   = avctx->time_base.den;
+FF_DISABLE_DEPRECATION_WARNINGS
+        param->frame_rate_denominator = avctx->time_base.num
+#if FF_API_TICKS_PER_FRAME
+            * avctx->ticks_per_frame
+#endif
+            ;
+FF_ENABLE_DEPRECATION_WARNINGS
+    }
+
+    /* 2 = IDR, closed GOP, 1 = CRA, open GOP */
+    param->intra_refresh_type = avctx->flags & AV_CODEC_FLAG_CLOSED_GOP ? 2 : 1;
+
+    handle_side_data(avctx, param);
 
 #if SVT_AV1_CHECK_VERSION(0, 9, 1)
     while ((en = av_dict_get(svt_enc->svtav1_opts, "", en, AV_DICT_IGNORE_SUFFIX))) {
@@ -214,7 +344,6 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
     param->source_width     = avctx->width;
     param->source_height    = avctx->height;
 
-    desc = av_pix_fmt_desc_get(avctx->pix_fmt);
     param->encoder_bit_depth = desc->comp[0].depth;
 
     if (desc->log2_chroma_w == 1 && desc->log2_chroma_h == 1)
@@ -228,50 +357,30 @@ static int config_enc_params(EbSvtAv1EncConfiguration *param,
         return AVERROR(EINVAL);
     }
 
-    param->color_primaries          = avctx->color_primaries;
-    param->matrix_coefficients      = (desc->flags & AV_PIX_FMT_FLAG_RGB) ?
-                                      AVCOL_SPC_RGB : avctx->colorspace;
-    param->transfer_characteristics = avctx->color_trc;
-
-    if (avctx->color_range != AVCOL_RANGE_UNSPECIFIED)
-        param->color_range = avctx->color_range == AVCOL_RANGE_JPEG;
-    else
-        param->color_range = !!(desc->flags & AV_PIX_FMT_FLAG_RGB);
-
-    if (avctx->profile != FF_PROFILE_UNKNOWN)
-        param->profile = avctx->profile;
-
-    if (avctx->level != FF_LEVEL_UNKNOWN)
-        param->level = avctx->level;
-
     if ((param->encoder_color_format == EB_YUV422 || param->encoder_bit_depth > 10)
-         && param->profile != FF_PROFILE_AV1_PROFESSIONAL ) {
+         && param->profile != AV_PROFILE_AV1_PROFESSIONAL ) {
         av_log(avctx, AV_LOG_WARNING, "Forcing Professional profile\n");
-        param->profile = FF_PROFILE_AV1_PROFESSIONAL;
-    } else if (param->encoder_color_format == EB_YUV444 && param->profile != FF_PROFILE_AV1_HIGH) {
+        param->profile = AV_PROFILE_AV1_PROFESSIONAL;
+    } else if (param->encoder_color_format == EB_YUV444 && param->profile != AV_PROFILE_AV1_HIGH) {
         av_log(avctx, AV_LOG_WARNING, "Forcing High profile\n");
-        param->profile = FF_PROFILE_AV1_HIGH;
+        param->profile = AV_PROFILE_AV1_HIGH;
     }
 
-    if (avctx->gop_size > 0)
-        param->intra_period_length  = avctx->gop_size - 1;
+    avctx->bit_rate       = param->rate_control_mode > 0 ?
+                            param->target_bit_rate : 0;
+    avctx->rc_max_rate    = param->max_bit_rate;
+    avctx->rc_buffer_size = param->maximum_buffer_size_ms *
+                            FFMAX(avctx->bit_rate, avctx->rc_max_rate) / 1000LL;
 
-    if (avctx->framerate.num > 0 && avctx->framerate.den > 0) {
-        param->frame_rate_numerator   = avctx->framerate.num;
-        param->frame_rate_denominator = avctx->framerate.den;
-    } else {
-        param->frame_rate_numerator   = avctx->time_base.den;
-        param->frame_rate_denominator = avctx->time_base.num * avctx->ticks_per_frame;
+    if (avctx->bit_rate || avctx->rc_max_rate || avctx->rc_buffer_size) {
+        AVCPBProperties *cpb_props = ff_encode_add_cpb_side_data(avctx);
+        if (!cpb_props)
+            return AVERROR(ENOMEM);
+
+        cpb_props->buffer_size = avctx->rc_buffer_size;
+        cpb_props->max_bitrate = avctx->rc_max_rate;
+        cpb_props->avg_bitrate = avctx->bit_rate;
     }
-
-    avctx->bit_rate                 = param->target_bit_rate;
-    if (avctx->bit_rate) {
-        param->max_qp_allowed       = avctx->qmax;
-        param->min_qp_allowed       = avctx->qmin;
-    }
-
-    /* 2 = IDR, closed GOP, 1 = CRA, open GOP */
-    param->intra_refresh_type = avctx->flags & AV_CODEC_FLAG_CLOSED_GOP ? 2 : 1;
 
     return 0;
 }
@@ -385,11 +494,8 @@ static int eb_send_frame(AVCodecContext *avctx, const AVFrame *frame)
         if (svt_enc->eos_flag == EOS_SENT)
             return 0;
 
-        headerPtrLast.n_alloc_len   = 0;
-        headerPtrLast.n_filled_len  = 0;
-        headerPtrLast.n_tick_count  = 0;
-        headerPtrLast.p_app_private = NULL;
-        headerPtrLast.p_buffer      = NULL;
+        memset(&headerPtrLast, 0, sizeof(headerPtrLast));
+        headerPtrLast.pic_type      = EB_AV1_INVALID_PICTURE;
         headerPtrLast.flags         = EB_BUFFERFLAG_EOS;
 
         svt_av1_enc_send_picture(svt_enc->svt_handle, &headerPtrLast);
@@ -404,6 +510,19 @@ static int eb_send_frame(AVCodecContext *avctx, const AVFrame *frame)
     headerPtr->flags         = 0;
     headerPtr->p_app_private = NULL;
     headerPtr->pts           = frame->pts;
+
+    switch (frame->pict_type) {
+    case AV_PICTURE_TYPE_I:
+        headerPtr->pic_type = EB_AV1_KEY_PICTURE;
+        break;
+    default:
+        // Actually means auto, or default.
+        headerPtr->pic_type = EB_AV1_INVALID_PICTURE;
+        break;
+    }
+
+    if (avctx->gop_size == 1)
+        headerPtr->pic_type = EB_AV1_KEY_PICTURE;
 
     svt_av1_enc_send_picture(svt_enc->svt_handle, headerPtr);
 
@@ -461,6 +580,14 @@ static int eb_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
     if (svt_ret == EB_NoErrorEmptyQueue)
         return AVERROR(EAGAIN);
 
+#if SVT_AV1_CHECK_VERSION(2, 0, 0)
+    if (headerPtr->flags & EB_BUFFERFLAG_EOS) {
+         svt_enc->eos_flag = EOS_RECEIVED;
+         svt_av1_enc_release_out_buffer(&headerPtr);
+         return AVERROR_EOF;
+    }
+#endif
+
     ref = get_output_ref(avctx, svt_enc, headerPtr->n_filled_len);
     if (!ref) {
         av_log(avctx, AV_LOG_ERROR, "Failed to allocate output packet.\n");
@@ -495,8 +622,10 @@ static int eb_receive_packet(AVCodecContext *avctx, AVPacket *pkt)
     if (headerPtr->pic_type == EB_AV1_NON_REF_PICTURE)
         pkt->flags |= AV_PKT_FLAG_DISPOSABLE;
 
+#if !(SVT_AV1_CHECK_VERSION(2, 0, 0))
     if (headerPtr->flags & EB_BUFFERFLAG_EOS)
         svt_enc->eos_flag = EOS_RECEIVED;
+#endif
 
     ff_side_data_set_encoder_stats(pkt, headerPtr->qp * FF_QP2LAMBDA, NULL, 0, pict_type);
 
@@ -527,27 +656,13 @@ static av_cold int eb_enc_close(AVCodecContext *avctx)
 #define OFFSET(x) offsetof(SvtContext, x)
 #define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
-#if FF_API_SVTAV1_OPTS
-    { "hielevel", "Hierarchical prediction levels setting (Deprecated, use svtav1-params)", OFFSET(hierarchical_level),
-      AV_OPT_TYPE_INT, { .i64 = 4 }, 3, 4, VE | AV_OPT_FLAG_DEPRECATED , "hielevel"},
-        { "3level", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 3 },  INT_MIN, INT_MAX, VE, "hielevel" },
-        { "4level", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 4 },  INT_MIN, INT_MAX, VE, "hielevel" },
-
-    { "la_depth", "Look ahead distance [0, 120] (Deprecated, use svtav1-params)", OFFSET(la_depth),
-      AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 120, VE | AV_OPT_FLAG_DEPRECATED },
-
-    { "tier", "Set operating point tier (Deprecated, use svtav1-params)", OFFSET(tier),
-      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, VE | AV_OPT_FLAG_DEPRECATED, "tier" },
-        { "main", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, VE, "tier" },
-        { "high", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, VE, "tier" },
-#endif
     { "preset", "Encoding preset",
-      OFFSET(enc_mode), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, MAX_ENC_PRESET, VE },
+      OFFSET(enc_mode), AV_OPT_TYPE_INT, { .i64 = -2 }, -2, MAX_ENC_PRESET, VE },
 
     FF_AV1_PROFILE_OPTS
 
 #define LEVEL(name, value) name, NULL, 0, AV_OPT_TYPE_CONST, \
-      { .i64 = value }, 0, 0, VE, "avctx.level"
+      { .i64 = value }, 0, 0, VE, .unit = "avctx.level"
         { LEVEL("2.0", 20) },
         { LEVEL("2.1", 21) },
         { LEVEL("2.2", 22) },
@@ -578,14 +693,6 @@ static const AVOption options[] = {
       AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 63, VE },
     { "qp", "Initial Quantizer level value", OFFSET(qp),
       AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 63, VE },
-#if FF_API_SVTAV1_OPTS
-    { "sc_detection", "Scene change detection (Deprecated, use svtav1-params)", OFFSET(scd),
-      AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE | AV_OPT_FLAG_DEPRECATED },
-
-    { "tile_columns", "Log2 of number of tile columns to use (Deprecated, use svtav1-params)", OFFSET(tile_columns), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 4, VE | AV_OPT_FLAG_DEPRECATED },
-    { "tile_rows", "Log2 of number of tile rows to use (Deprecated, use svtav1-params)", OFFSET(tile_rows), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 6, VE | AV_OPT_FLAG_DEPRECATED },
-#endif
-
     { "svtav1-params", "Set the SVT-AV1 configuration using a :-separated list of key=value parameters", OFFSET(svtav1_opts), AV_OPT_TYPE_DICT, { 0 }, 0, 0, VE },
 
     {NULL},
@@ -609,15 +716,16 @@ static const FFCodecDefault eb_enc_defaults[] = {
 
 const FFCodec ff_libsvtav1_encoder = {
     .p.name         = "libsvtav1",
-    .p.long_name    = NULL_IF_CONFIG_SMALL("SVT-AV1(Scalable Video Technology for AV1) encoder"),
+    CODEC_LONG_NAME("SVT-AV1(Scalable Video Technology for AV1) encoder"),
     .priv_data_size = sizeof(SvtContext),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_AV1,
     .init           = eb_enc_init,
-    .receive_packet = eb_receive_packet,
+    FF_CODEC_RECEIVE_PACKET_CB(eb_receive_packet),
     .close          = eb_enc_close,
     .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_OTHER_THREADS,
-    .caps_internal  = FF_CODEC_CAP_AUTO_THREADS | FF_CODEC_CAP_INIT_CLEANUP,
+    .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE |
+                      FF_CODEC_CAP_AUTO_THREADS | FF_CODEC_CAP_INIT_CLEANUP,
     .p.pix_fmts     = (const enum AVPixelFormat[]){ AV_PIX_FMT_YUV420P,
                                                     AV_PIX_FMT_YUV420P10,
                                                     AV_PIX_FMT_NONE },

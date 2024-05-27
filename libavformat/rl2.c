@@ -37,6 +37,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mathematics.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 #define EXTRADATA1_SIZE (6 + 256 * 3) ///< video base, clr, palette
@@ -301,9 +302,9 @@ static int rl2_read_seek(AVFormatContext *s, int stream_index, int64_t timestamp
     return 0;
 }
 
-const AVInputFormat ff_rl2_demuxer = {
-    .name           = "rl2",
-    .long_name      = NULL_IF_CONFIG_SMALL("RL2"),
+const FFInputFormat ff_rl2_demuxer = {
+    .p.name         = "rl2",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("RL2"),
     .priv_data_size = sizeof(Rl2DemuxContext),
     .read_probe     = rl2_probe,
     .read_header    = rl2_read_header,

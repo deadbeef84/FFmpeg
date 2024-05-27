@@ -35,6 +35,7 @@
 #include "libavutil/channel_layout.h"
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 #define CHUNK_PREAMBLE_SIZE 4
@@ -699,9 +700,9 @@ static int ipmovie_read_packet(AVFormatContext *s,
     }
 }
 
-const AVInputFormat ff_ipmovie_demuxer = {
-    .name           = "ipmovie",
-    .long_name      = NULL_IF_CONFIG_SMALL("Interplay MVE"),
+const FFInputFormat ff_ipmovie_demuxer = {
+    .p.name         = "ipmovie",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Interplay MVE"),
     .priv_data_size = sizeof(IPMVEContext),
     .read_probe     = ipmovie_probe,
     .read_header    = ipmovie_read_header,

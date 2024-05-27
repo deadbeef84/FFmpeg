@@ -29,6 +29,7 @@
 #include "libavutil/tree.h"
 #include "libavcodec/bytestream.h"
 #include "avio_internal.h"
+#include "demux.h"
 #include "isom.h"
 #include "nut.h"
 #include "riff.h"
@@ -199,6 +200,8 @@ static int decode_main_header(NUTContext *nut)
     int tmp_stream, tmp_mul, tmp_pts, tmp_size, tmp_res, tmp_head_idx;
 
     length = get_packetheader(nut, bc, 1, MAIN_STARTCODE);
+    if (length == (uint64_t)-1)
+        return AVERROR_INVALIDDATA;
     end = length + avio_tell(bc);
 
     nut->version = ffio_read_varlen(bc);
@@ -242,6 +245,11 @@ static int decode_main_header(NUTContext *nut)
     for (i = 0; i < 256;) {
         int tmp_flags  = ffio_read_varlen(bc);
         int tmp_fields = ffio_read_varlen(bc);
+        if (tmp_fields < 0) {
+            av_log(s, AV_LOG_ERROR, "fields %d is invalid\n", tmp_fields);
+            ret = AVERROR_INVALIDDATA;
+            goto fail;
+        }
 
         if (tmp_fields > 0)
             tmp_pts = get_s(bc);
@@ -961,10 +969,6 @@ static int read_sm_data(AVFormatContext *s, AVIOContext *bc, AVPacket *pkt, int 
         if (!dst)
             return AVERROR(ENOMEM);
         bytestream_put_le32(&dst,
-#if FF_API_OLD_CHANNEL_LAYOUT
-                            AV_SIDE_DATA_PARAM_CHANGE_CHANNEL_COUNT*(!!channels) +
-                            AV_SIDE_DATA_PARAM_CHANGE_CHANNEL_LAYOUT*(!!channel_layout) +
-#endif
                             AV_SIDE_DATA_PARAM_CHANGE_SAMPLE_RATE*(!!sample_rate) +
                             AV_SIDE_DATA_PARAM_CHANGE_DIMENSIONS*(!!(width|height))
                            );
@@ -1124,7 +1128,6 @@ static int decode_frame(NUTContext *nut, AVPacket *pkt, int frame_code)
         }
         sm_size = avio_tell(bc) - pkt->pos;
         size      -= sm_size;
-        pkt->size -= sm_size;
     }
 
     ret = avio_read(bc, pkt->data + nut->header_len[header_idx], size);
@@ -1303,17 +1306,17 @@ static int read_seek(AVFormatContext *s, int stream_index,
     return 0;
 }
 
-const AVInputFormat ff_nut_demuxer = {
-    .name           = "nut",
-    .long_name      = NULL_IF_CONFIG_SMALL("NUT"),
-    .flags          = AVFMT_SEEK_TO_PTS,
+const FFInputFormat ff_nut_demuxer = {
+    .p.name         = "nut",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("NUT"),
+    .p.flags        = AVFMT_SEEK_TO_PTS,
+    .p.extensions   = "nut",
+    .p.codec_tag    = ff_nut_codec_tags,
     .priv_data_size = sizeof(NUTContext),
-    .flags_internal = FF_FMT_INIT_CLEANUP,
+    .flags_internal = FF_INFMT_FLAG_INIT_CLEANUP,
     .read_probe     = nut_probe,
     .read_header    = nut_read_header,
     .read_packet    = nut_read_packet,
     .read_close     = nut_read_close,
     .read_seek      = read_seek,
-    .extensions     = "nut",
-    .codec_tag      = ff_nut_codec_tags,
 };
