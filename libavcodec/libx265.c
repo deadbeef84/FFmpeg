@@ -33,6 +33,7 @@
 #include "libavutil/mastering_display_metadata.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/time.h"
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "encode.h"
@@ -41,6 +42,7 @@
 #include "sei.h"
 
 typedef struct ReorderedData {
+    int64_t wallclock;
     int64_t duration;
 
     void        *frame_opaque;
@@ -77,6 +79,7 @@ typedef struct libx265Context {
      * encounter a frame with ROI side data.
      */
     int roi_warned;
+    int prft_warned;
 } libx265Context;
 
 static int is_keyframe(NalUnitType naltype)
@@ -701,6 +704,23 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
             }
         }
 
+        if (avctx->export_side_data & AV_CODEC_EXPORT_DATA_PRFT) {
+            AVProducerReferenceTime *prft;
+            AVFrameSideData *side_data;
+
+            side_data = av_frame_get_side_data(pic, AV_FRAME_DATA_PRFT);
+            if (side_data && side_data->size >= sizeof(AVProducerReferenceTime)) {
+                prft = (AVProducerReferenceTime *)side_data->data;
+                rd->wallclock = prft->wallclock;
+            } else {
+                rd->wallclock = av_gettime();
+                if (!ctx->prft_warned) {
+                    av_log(ctx, AV_LOG_WARNING, "setting prft wallclock from av_gettime\n");
+                    ctx->prft_warned = 1;
+                }
+            }
+        }
+
         x265pic.userData = (void*)(intptr_t)(rd_idx + 1);
 
         if (ctx->a53_cc) {
@@ -829,6 +849,9 @@ static int libx265_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         ReorderedData *rd = &ctx->rd[idx];
 
         pkt->duration           = rd->duration;
+
+        if (rd->wallclock)
+            ff_side_data_set_prft(pkt, rd->wallclock);
 
         if (avctx->flags & AV_CODEC_FLAG_COPY_OPAQUE) {
             pkt->opaque          = rd->frame_opaque;
