@@ -49,6 +49,7 @@ struct NDIContext {
 
     /* Runtime */
     NDIlib_recv_instance_t recv;
+    NDIlib_framesync_instance_t framesync;
     NDIlib_find_instance_t ndi_find;
 
     /* Streams */
@@ -255,6 +256,8 @@ static int ndi_read_header(AVFormatContext *avctx)
         return AVERROR(EIO);
     }
 
+    ctx->framesync = NDIlib_framesync_create(ctx->recv);
+
     /* Set tally */
     NDIlib_recv_set_tally(ctx->recv, &tally_state);
 
@@ -347,11 +350,61 @@ static int ndi_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     int ret = 0;
     struct NDIContext *ctx = avctx->priv_data;
 
+    int64_t accumulated_time = 0;
+    int64_t reference_time = AV_NOPTS_VALUE;
+
     while (!ret) {
         NDIlib_video_frame_v2_t v;
         NDIlib_audio_frame_v2_t a;
         NDIlib_metadata_frame_t m;
         NDIlib_frame_type_e t;
+
+        // See ndi-sdk-6.2.1.0/examples/C++/NDIlib_Recv_FrameSync_timing/NDIlib_Recv_FrameSync_timing.cpp
+        if (ctx->framesync) {
+            NDIlib_framesync_capture_video(ctx->framesync, &v);
+
+            if (reference_time == AV_NOPTS_VALUE) {
+                if (!v.p_data) {
+                    NDIlib_framesync_free_video(ctx->framesync, &v);
+                    av_usleep(33000);
+                    continue;
+                }
+                reference_time = av_gettime();
+            }
+
+		    const int64_t frame_length = av_rescale_q(1, (AVRational){v.frame_rate_D, v.frame_rate_N}, NDI_TIME_BASE_Q);
+            const int64_t frame_start = accumulated_time;
+		    const int64_t frame_end = accumulated_time + frame_length;
+
+            const int64_t audio_sample_no_start = (frame_start * (int64_t)audio_sample_rate) / timebase;
+            const int64_t audio_sample_no_end = (frame_end * (int64_t)audio_sample_rate) / timebase;
+            const int     audio_samples_no = (int)(audio_sample_no_end - audio_sample_no_start);
+
+            // Capture the audio samples.
+            NDIlib_audio_frame_v2_t audio_frame;
+            NDIlib_framesync_capture_audio(pNDI_framesync, &audio_frame, audio_sample_rate, audio_no_channels, audio_samples_no);
+
+            if (!ctx->video_st)
+                ret = ndi_create_video_stream(avctx, &v);
+            if (!ret)
+                ret = ndi_set_video_packet(avctx, &v, pkt);
+
+            if (!ctx->audio_st)
+                ret = ndi_create_audio_stream(avctx, &a);
+            if (!ret)
+                ret = ndi_set_audio_packet(avctx, &a, pkt);
+
+            NDIlib_framesync_free_video(ctx->framesync, &v);
+            NDIlib_framesync_free_audio(ctx->framesync, &a);
+
+            accumulated_time = frame_end;
+
+            const int64_t wait_until = reference_time + av_rescale_q(accumulated_time, (AVRational){1, NDI_TIME_BASE}, (AVRational){1, AV_TIME_BASE});
+            int64_t now = av_gettime();
+            if (wait_until > now)
+                av_usleep(wait_until - now);
+            continue;
+        }
 
         av_log(avctx, AV_LOG_DEBUG, "NDIlib_recv_capture_v2...\n");
         t = NDIlib_recv_capture_v2(ctx->recv, &v, &a, &m, 40);
@@ -387,6 +440,8 @@ static int ndi_read_packet(AVFormatContext *avctx, AVPacket *pkt)
 static int ndi_read_close(AVFormatContext *avctx)
 {
     struct NDIContext *ctx = (struct NDIContext *)avctx->priv_data;
+
+    NDIlib_framesync_destroy(pNDI_framesync);
 
     if (ctx->recv)
         NDIlib_recv_destroy(ctx->recv);
