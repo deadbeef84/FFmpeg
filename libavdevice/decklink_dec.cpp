@@ -818,6 +818,14 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
     video_pkt_pts = get_pkt_pts(videoFrame, audioFrame, wallclock, abs_wallclock, ctx->video_pts_source, ctx->video_st->time_base, &initial_video_pts, cctx->copyts);
     audio_pkt_pts = get_pkt_pts(videoFrame, audioFrame, wallclock, abs_wallclock, ctx->audio_pts_source, ctx->audio_st->time_base, &initial_audio_pts, cctx->copyts);
 
+    if (!videoFrame) {
+        av_log(avctx, AV_LOG_WARNING, "missing video frame (#%lu)\n", ctx->frameCount);
+    }
+
+    if (!audioFrame) {
+        av_log(avctx, AV_LOG_WARNING, "missing audio frame (#%lu)\n", ctx->frameCount);
+    }
+
     // Handle Video Frame
     if (videoFrame) {
         AVPacket pkt = { 0 };
@@ -833,6 +841,41 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
         videoFrame->GetBytes(&frameBytes);
         videoFrame->GetStreamTime(&frameTime, &frameDuration,
                                   ctx->video_st->time_base.den);
+
+        BMDTimeValue audioTime;
+        if (audioFrame) {
+            audioFrame->GetPacketTime(&audioTime, ctx->audio_st->time_base.den);
+        }
+
+        BMDTimeValue refTime;
+        BMDTimeValue refDuration;
+        videoFrame->GetHardwareReferenceTimestamp(ctx->video_st->time_base.den, &refTime, &refDuration);
+
+        av_log(avctx, AV_LOG_INFO,
+            "video arrived: frame=%lu reftime=%" PRId64 " vtime=%" PRId64 " atime=%" PRId64 " duration=%" PRId64 " size=%ux%u rowbytes=%u pixfmt=%u flags=0x%X samples=%ld video_pts=%" PRId64 " audio_pts=%" PRId64 "\n",
+            ctx->frameCount,
+            refTime,
+            frameTime,
+            audioFrame ? audioTime : 0L,
+            frameDuration,
+            videoFrame->GetWidth(),
+            videoFrame->GetHeight(),
+            videoFrame->GetRowBytes(),
+            videoFrame->GetPixelFormat(),
+            videoFrame->GetFlags(),
+            audioFrame ? audioFrame->GetSampleFrameCount() : -1L,
+            video_pkt_pts,
+            audio_pkt_pts
+        );
+
+        if (audioFrame && audioFrame->GetSampleFrameCount() != 960) {
+            av_log(avctx, AV_LOG_WARNING, "unexpected audio sample frame count\n");
+        }
+
+        if (videoFrame->GetWidth() != ctx->video_st->codecpar->width ||
+            videoFrame->GetHeight() != ctx->video_st->codecpar->height) {
+            av_log(avctx, AV_LOG_WARNING, "unexpected video frame size\n");
+        }
 
         if (videoFrame->GetFlags() & bmdFrameHasNoInputSource) {
             if (ctx->signal_loss_action == SIGNAL_LOSS_BARS && videoFrame->GetPixelFormat() == bmdFormat8BitYUV) {
@@ -854,8 +897,9 @@ HRESULT decklink_input_callback::VideoInputFrameArrived(
 
             if (!no_video) {
                 av_log(avctx, AV_LOG_WARNING, "Frame received (#%lu) - No input signal detected "
-                        "- Frames dropped %u\n", ctx->frameCount, ++ctx->dropped);
+                        "- Frames dropped %u\n", ctx->frameCount, ctx->dropped);
             }
+            ++ctx->dropped;
             no_video = 1;
         } else {
             if (ctx->signal_loss_action == SIGNAL_LOSS_REPEAT) {
